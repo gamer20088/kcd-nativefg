@@ -272,6 +272,31 @@ int main() {
     ID3D12Resource* h2 = consume(guides, &slot);
     CHECK(h2 && h2->GetDesc().Width == W * 2 && g_s.gen == gen_before + 1, "after resize: %p gen %u", h2, g_s.gen);
 
+    // Multiplier from Encore's config (fixed mode) -> numFramesToGenerate, only for DLSSGMode::eOn.
+    g_jsonc_path = L"kcd_test_rtx-encore.jsonc";
+    auto write_jsonc = [](const char* body) {
+        HANDLE h = CreateFileW(L"kcd_test_rtx-encore.jsonc", GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+        DWORD n;
+        WriteFile(h, body, static_cast<DWORD>(strlen(body)), &n, nullptr);
+        CloseHandle(h);
+    };
+    write_jsonc("{ \"frameGenerationEngine\": \"dlss-fg\" },\n\"frameGeneration\": {\n  \"mode\": \"fixed\",   // c\n"
+                "  \"multiplier\": 4,  // c\n  \"dynamicTargetFrameRate\": 0\n}");
+    CHECK(read_encore_multiplier() == 4, "jsonc fixed 4 -> %d", read_encore_multiplier());
+    write_jsonc("\"frameGeneration\": { \"mode\": \"game\", \"multiplier\": 4 }");
+    CHECK(read_encore_multiplier() == 0, "jsonc game mode must not override");
+    g_fg_multiplier = 3;
+    uint8_t o[0x100] = {};
+    o[kOptMode] = 1;
+    *reinterpret_cast<uint32_t*>(o + kOptFrames) = 1;
+    apply_multiplier(o);
+    CHECK(*reinterpret_cast<uint32_t*>(o + kOptFrames) == 2, "3x -> numFramesToGenerate 2");
+    o[kOptMode] = 0;
+    *reinterpret_cast<uint32_t*>(o + kOptFrames) = 1;
+    apply_multiplier(o);
+    CHECK(*reinterpret_cast<uint32_t*>(o + kOptFrames) == 1, "mode off must stay untouched");
+    DeleteFileW(L"kcd_test_rtx-encore.jsonc");
+
     printf(g_fail ? "encore_uir_interop: %d FAILED\n" : "encore_uir_interop: all checks passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

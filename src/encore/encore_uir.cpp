@@ -53,6 +53,7 @@ constexpr size_t kOptGuid = 0x08, kOptVersion = 0x18, kOptFlags = 0x28, kOptHudl
 constexpr uint32_t kFlagFullscreenMenuDetection = 1u << 4;  // sl::DLSSGFlags::eEnableFullscreenMenuDetection
 constexpr uint32_t kFlagRetainResourcesWhenOff = 1u << 3;   // sl::DLSSGFlags::eRetainResourcesWhenOff
 constexpr size_t kOptMode = 0x20;                           // sl::DLSSGMode (0 = eOff), as 0x1F6E0 writes it
+constexpr size_t kOptFrames = 0x24;                         // numFramesToGenerate (multiplier - 1), as 0x1F6E0 writes it
 constexpr size_t kOptCopy = 0x78;  // what Encore's 0x1F6E0 initializes (through +0x74)
 constexpr uint8_t kSlTrue = 1;
 // sl::Resource / sl::ResourceTag as Encore builds them in 0x20840 (GUIDs read from its .rdata).
@@ -80,6 +81,73 @@ static bool g_menu_detection = true;  // [encore] menu_detection
 static bool g_inputs = true;          // [encore] uir: hand HUD-less/UI to DLSS-G and enable UIR (0 = suspension only)
 static bool g_alpha_only;             // [encore] ui_input = alpha: kBufferTypeUIAlpha (R8) instead of color+alpha
 static std::atomic<bool> g_suspended;  // frame generation suspended (menus): options mode forced to eOff
+// [encore] fg_multiplier: -1 = rtx-encore.jsonc frameGeneration.multiplier (fixed mode), 0 = Encore's request as is,
+// 2..6 = this multiplier. Encore 2.5.0 caps its DX11 present route at 2x (maximum=2; COMPATIBILITY.md "DirectX 11:
+// DLSS MFG ... unavailable"); its DLSS-G backend is D3D12 with sl.dlss_g/nvngx_dlssg patched to 6x.
+static int g_fg_setting = -1;
+static std::atomic<int> g_fg_multiplier{0};  // effective: 0 = no override
+static std::wstring g_jsonc_path;
+static FILETIME g_jsonc_time;
+
+void set_fg_multiplier(int m) { g_fg_setting = m; }
+
+// Reads frameGeneration.mode / multiplier from Encore's own config. 0 unless mode is "fixed".
+static int read_encore_multiplier() {
+    HANDLE h = CreateFileW(g_jsonc_path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return 0;
+    std::string text(64 * 1024, '\0');
+    DWORD n = 0;
+    ReadFile(h, text.data(), static_cast<DWORD>(text.size()), &n, nullptr);
+    CloseHandle(h);
+    text.resize(n);
+    const size_t fg = text.find("\"frameGeneration\"");
+    if (fg == std::string::npos)
+        return 0;
+    auto value_after = [&](const char* key) -> std::string {
+        size_t k = text.find(key, fg);
+        if (k == std::string::npos)
+            return {};
+        size_t c = text.find(':', k);
+        size_t s = text.find_first_not_of(" \t\"", c + 1);
+        size_t e = text.find_first_of(",\"\r\n /", s);
+        return s == std::string::npos ? std::string() : text.substr(s, e - s);
+    };
+    if (value_after("\"mode\"") != "fixed")
+        return 0;
+    const int m = atoi(value_after("\"multiplier\"").c_str());
+    return m >= 2 && m <= 6 ? m : 0;
+}
+
+// Render thread, once per frame: picks up multiplier changes made in Encore's menu (it saves rtx-encore.jsonc).
+static bool refresh_multiplier() {
+    int m = g_fg_setting >= 2 ? g_fg_setting : 0;
+    if (g_fg_setting == -1) {
+        WIN32_FILE_ATTRIBUTE_DATA a{};
+        if (!GetFileAttributesExW(g_jsonc_path.c_str(), GetFileExInfoStandard, &a))
+            return false;
+        if (CompareFileTime(&a.ftLastWriteTime, &g_jsonc_time) == 0)
+            return false;
+        g_jsonc_time = a.ftLastWriteTime;
+        m = read_encore_multiplier();
+    }
+    if (g_fg_multiplier.exchange(m) == m)
+        return false;
+    logf("encore_uir: frame generation multiplier %dx%s", m ? m : 0,
+         m ? " requested from DLSS-G" : " (Encore's own request)");
+    return true;
+}
+
+static void apply_multiplier(uint8_t* p) {
+    const int m = g_fg_multiplier.load();
+    uint32_t mode;
+    memcpy(&mode, p + kOptMode, sizeof(mode));
+    if (m < 2 || mode != 1)  // only for DLSSGMode::eOn
+        return;
+    const uint32_t frames = static_cast<uint32_t>(m - 1);
+    memcpy(p + kOptFrames, &frames, sizeof(frames));
+}
 
 void set_ui_alpha_only(bool on) { g_alpha_only = on; }
 void set_inputs(bool on) { g_inputs = on; }
@@ -287,6 +355,7 @@ static void resend_options_if_needed(const void* viewport) {
     memcpy(opts, g_s.last_opts, sizeof(opts));
     opts[kOptUir] = kSlTrue;
     patch_flags(opts);
+    apply_multiplier(opts);
     apply_suspension(opts);
     memcpy(opts + kOptHudlessFormat, &hud, sizeof(hud));
     memcpy(opts + kOptUiFormat, &ui, sizeof(ui));
@@ -311,11 +380,29 @@ void set_fg_suspended(bool on) {
     }
     alignas(16) uint8_t opts[sizeof(g_s.last_opts)];
     memcpy(opts, g_s.last_opts, sizeof(opts));
+    apply_multiplier(opts);
     apply_suspension(opts);
     uint32_t mode;
     memcpy(&mode, opts + kOptMode, sizeof(mode));
     const int r = real(reinterpret_cast<const void*>(g_base + kViewportRva), opts);
     logf("encore_uir: frame generation %s: DLSS-G options mode %u -> %d", on ? "suspended" : "resumed", mode, r);
+}
+
+// Render thread, once per frame (hudless::on_end_frame): apply a changed multiplier by re-sending Encore's last options.
+void on_frame() {
+    if (!g_active || !refresh_multiplier() || g_suspended.load())
+        return;
+    std::lock_guard lock(g_s.m);
+    SetOptionsFn real = g_real_set_options.load();
+    if (!g_s.have_opts || !real)
+        return;
+    alignas(16) uint8_t opts[sizeof(g_s.last_opts)];
+    memcpy(opts, g_s.last_opts, sizeof(opts));
+    apply_multiplier(opts);
+    uint32_t frames;
+    memcpy(&frames, opts + kOptFrames, sizeof(frames));
+    const int r = real(reinterpret_cast<const void*>(g_base + kViewportRva), opts);
+    logf("encore_uir: DLSS-G options re-sent with numFramesToGenerate %u: %d", frames, r);
 }
 
 // Present thread, inside the present trial, before Encore's tag copies. Returns this frame's HUD-less texture (and
@@ -580,6 +667,7 @@ static int __fastcall hk_set_options(const void* viewport, void* options) {
                 g_s.sent_hud_fmt = hud;
                 g_s.sent_ui_fmt = hud ? ui : 0;
             }
+            apply_multiplier(p);
             apply_suspension(p);
             uint64_t n = ++g_options_patched;
             if (n <= 8)
@@ -631,14 +719,19 @@ static NVSDK_NGX_Result __cdecl hk_ngx_eval(ID3D12GraphicsCommandList* list, con
             p->Get(NVSDK_NGX_DLSSG_Parameter_HUDLess, &hud);
             p->Get(NVSDK_NGX_DLSSG_Parameter_UI, &ui);
             p->Get(NVSDK_NGX_DLSSG_Parameter_UIAlpha, &ui_alpha);
+            unsigned frames = 0, frames_max = 0;
+            p->Get(NVSDK_NGX_DLSSG_Parameter_MultiFrameCount, &frames);
+            p->Get(NVSDK_NGX_DLSSG_Parameter_MultiFrameCountMax, &frames_max);
             const int uir = get_uir(p);
             static int last = -100;
             static uint64_t n;
-            const int key = (hud ? 1 : 0) | (ui ? 2 : 0) | (ui_alpha ? 1024 : 0) | ((uir & 0xFF) << 2);
+            const int key = (hud ? 1 : 0) | (ui ? 2 : 0) | (ui_alpha ? 1024 : 0) | ((uir & 0xFF) << 2) |
+                            static_cast<int>((frames & 0xF) << 12) | static_cast<int>((frames_max & 0xF) << 16);
             ++n;
             if (key != last || n % 3600 == 0) {
-                logf("ngx probe: DLSS-G evaluate #%llu: HUDLess %s, UI %s, UIAlpha %s, UserInterfaceRecompositionEnabled %d",
-                     n, hud ? "set" : "none", ui ? "set" : "none", ui_alpha ? "set" : "none", uir);
+                logf("ngx probe: DLSS-G evaluate #%llu: HUDLess %s, UI %s, UIAlpha %s, UserInterfaceRecompositionEnabled %d, "
+                     "MultiFrameCount %u (max %u)", n, hud ? "set" : "none", ui ? "set" : "none",
+                     ui_alpha ? "set" : "none", uir, frames, frames_max);
                 last = key;
             }
         }
@@ -698,6 +791,7 @@ bool install() {
         return false;
     }
     g_base = reinterpret_cast<uintptr_t>(mod);
+    g_jsonc_path = path.substr(0, path.find_last_of(L"\\/") + 1) + L"rtx-encore.jsonc";
     auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(g_base);
     auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(g_base + dos->e_lfanew);
     const bool build = nt->FileHeader.TimeDateStamp == kTimestamp && nt->OptionalHeader.SizeOfImage == kSizeOfImage;

@@ -93,6 +93,7 @@ static DWORD WINAPI init_thread(LPVOID) {
                               static_cast<UINT>(config().encore_menu_draws));
     // uir = 0 with menu_suspend = 1: interface capture only feeds menu detection; DLSS-G keeps estimating the UI itself.
     encore_uir::set_inputs(config().encore_uir);
+    encore_uir::set_fg_multiplier(config().encore_fg_multiplier);
     hudless::set_enabled(config().mode && (config().encore_uir || config().encore_menu_suspend) &&
                          encore_uir::install());
 

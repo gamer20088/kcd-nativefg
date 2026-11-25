@@ -31,6 +31,10 @@ bool ui_alpha_only();
 void set_fg_suspended(bool on);
 // [encore] uir: false = keep only the options wrapper (menu suspension); no HUD-less/UI inputs, UIR left as Encore sets it.
 void set_inputs(bool on);
+// [encore] fg_multiplier: -1 = follow rtx-encore.jsonc (fixed mode), 0 = Encore's request, 2..6 = this multiplier.
+void set_fg_multiplier(int m);
+// Render thread, once per frame: re-sends the options when the multiplier changes.
+void on_frame();
 
 constexpr DXGI_FORMAT kUiFormat = DXGI_FORMAT_R8G8B8A8_UNORM;  // premultiplied UI color + coverage alpha
 

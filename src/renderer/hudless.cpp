@@ -634,6 +634,7 @@ void on_end_frame() {
         logf("hudless trace: next frame%s", f10 ? " (F10, layers dumped)" : "");
     }
     f10_was = f10;
+    encore_uir::on_frame();
     // Automatic dump once per session: 1200 interface frames in, frame generation on, little interface on screen.
     if (g_auto_dump < 0 && g_at_ui >= 1200 && !g_suspended && g_coverage >= 0.0f && g_coverage < 0.1f && g_snapped)
         g_auto_dump = 2;

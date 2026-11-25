@@ -29,12 +29,13 @@ void config_load(const std::wstring& path) {
     g_config.encore_menu_suspend = GetPrivateProfileIntW(L"encore", L"menu_suspend", g_config.encore_menu_suspend, f) != 0;
     g_config.encore_menu_coverage = GetPrivateProfileIntW(L"encore", L"menu_coverage", g_config.encore_menu_coverage, f);
     g_config.encore_menu_draws = GetPrivateProfileIntW(L"encore", L"menu_draws", g_config.encore_menu_draws, f);
+    g_config.encore_fg_multiplier = static_cast<int>(GetPrivateProfileIntW(L"encore", L"fg_multiplier", g_config.encore_fg_multiplier, f));
     logf("config: %ls: mode %d, output %s, preset %d, velocity16 %d, velocity_cleanup %d, force_halton %d, cut_guard %d, "
-         "map_fix %d, encore uir %d menu_detection %d ui_input %d menu_suspend %d menu_coverage %d menu_draws %d", f,
+         "map_fix %d, encore uir %d menu_detection %d ui_input %d menu_suspend %d menu_coverage %d menu_draws %d fg_multiplier %d", f,
          g_config.mode, g_config.output ? "dlaa" : "game", g_config.dlss_preset, g_config.velocity16,
          g_config.velocity_cleanup, g_config.force_halton, g_config.cut_guard, g_config.map_fix, g_config.encore_uir,
          g_config.encore_menu_detection, g_config.encore_ui_alpha, g_config.encore_menu_suspend,
-         g_config.encore_menu_coverage, g_config.encore_menu_draws);
+         g_config.encore_menu_coverage, g_config.encore_menu_draws, g_config.encore_fg_multiplier);
     config_save();
 }
 
@@ -56,6 +57,7 @@ void config_save() {
     WritePrivateProfileStringW(L"encore", L"menu_suspend", g_config.encore_menu_suspend ? L"1" : L"0", f);
     WritePrivateProfileStringW(L"encore", L"menu_coverage", std::to_wstring(g_config.encore_menu_coverage).c_str(), f);
     WritePrivateProfileStringW(L"encore", L"menu_draws", std::to_wstring(g_config.encore_menu_draws).c_str(), f);
+    WritePrivateProfileStringW(L"encore", L"fg_multiplier", std::to_wstring(g_config.encore_fg_multiplier).c_str(), f);
 }
 
 }  // namespace kc

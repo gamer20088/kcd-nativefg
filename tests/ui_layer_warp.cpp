@@ -30,6 +30,7 @@ void copy_hudless(ID3D11DeviceContext*, ID3D11Resource*) {}
 void finish_frame(ID3D11DeviceContext*, ID3D11Resource*) {}
 bool ui_alpha_only() { return t_alpha_only; }
 void set_fg_suspended(bool) {}
+void on_frame() {}
 }  // namespace encore_uir
 namespace taa_dlss {
 bool scene_last_frame() { return true; }
