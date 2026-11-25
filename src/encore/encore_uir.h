@@ -33,6 +33,11 @@ void set_fg_suspended(bool on);
 void set_inputs(bool on);
 // [encore] fg_multiplier: -1 = follow rtx-encore.jsonc (fixed mode), 0 = Encore's request, 2..6 = this multiplier.
 void set_fg_multiplier(int m);
+// [encore] unlock_mfg: lift Encore's DX11 2x cap (its menu then offers 3x-6x and requests them itself).
+void set_unlock_mfg(bool on);
+// [encore] options_detour: true = MinHook slDLSSGSetOptions in place; false = swap Encore's pointer to it. The swap
+// points the pointer into this DLL, which Encore then admits as the DLSS-G wrapper with a 2x ceiling.
+void set_options_detour(bool on);
 // Render thread, once per frame: re-sends the options when the multiplier changes.
 void on_frame();
 

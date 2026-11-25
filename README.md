@@ -1,10 +1,10 @@
-﻿# KCD NativeFG | Native Frame Generation and HUD Fix for RTX Encore
+# KCD NativeFG | Native Frame Generation and HUD Fix for RTX Encore
 
 An add-on for **Kingdom Come: Deliverance** (the first game, DirectX 11) that gives
 [RTX Encore](https://github.com/SilyNoMeta/rtx-encore)'s DLSS Frame Generation the game's real motion vectors and
 depth, and separates the HUD from the 3D scene for DLSS-G UI recomposition. In our testing (one system, RTX 3080 Ti,
-2x frame generation) the HUD, interaction text and menu transitions were clearly cleaner than with RTX Encore alone;
-results on other systems may differ.
+2x and 3x frame generation) the HUD, interaction text and menu transitions were clearly cleaner than with RTX Encore
+alone; results on other systems may differ.
 
 KCD NativeFG is unofficial and not affiliated with Warhorse Studios, NVIDIA or the RTX Encore project. Based on
 [KCD1 Clarity](https://github.com/eonflux7/kcd1-clarity).
@@ -19,14 +19,28 @@ KCD NativeFG is unofficial and not affiliated with Warhorse Studios, NVIDIA or t
   interpolating it. In our testing this removed the visible warping of the compass, status icons and interaction text;
 NPC subtitles have not been checked separately.
 - **Menu handling.** Frame generation pauses while the map, inventory or loading screens are shown, and resumes
-  afterwards. In our testing this removed the smearing on map and inventory transitions.
+  afterwards. In our testing this removed the smearing on map and inventory transitions. Since v1.2.0 a pause needs
+  both many interface draws and most of the screen covered, which stopped the random 5-15 s pauses in busy scenes.
+- **Higher multipliers through RTX Encore's own menu** (v1.2.0). Earlier versions accidentally made RTX Encore treat
+  this add-on as the frame generation provider, and RTX Encore then greyed out everything above 2x. v1.2.0 hooks
+  Streamline in place, so RTX Encore recognises the real provider (`sl.dlss_g.dll`) and offers its higher
+  multipliers again. You choose the multiplier in RTX Encore; the add-on does not force one.
+- **RTX Encore's overlay** (v1.2.0). While RTX Encore's own menu is open (read from its real menu state, not a
+  hotkey), the HUD-less and UI inputs are withheld so the menu stays solid during camera movement.
+
+### Why RTX Encore shows "DLSS SR"
+
+The motion vectors and depth reach RTX Encore through an internal DLAA evaluation, so a DLSS feature exists and RTX
+Encore's overlay lists DLSS Super Resolution. With `output=0` (default) that result is discarded: nothing is
+upscaled and the image on screen is the game's own SMAA 2TX at native resolution.
 
 ## Releases
 
 | Release | Status |
 | --- | --- |
-| **v1.0.0** (recommended) | **Verified in gameplay** (RTX 3080 Ti, driver 617.42, 2560x1440): DLSS-G **2x**, UI recomposition (HUD-less + UI alpha), menu pausing, together with Windows HDR + RTX HDR. |
-| v1.1.0-experimental (prerelease) | **Experimental.** Adds `fg_multiplier`: passes the multiplier you choose in RTX Encore (3x to 6x) to DLSS-G past RTX Encore's DirectX 11 limit of 2x. It passed automated tests only. **Gameplay with more than 2x has not been verified.** `fg_multiplier=0`, or multiplier 2 in RTX Encore, behaves like v1.0.0. |
+| **v1.2.0** (recommended) | **Verified in gameplay** (RTX 3080 Ti, driver 617.42, 2560x1440, Windows HDR + RTX HDR) at **2x** and **3x**. At 3x, RTX Encore's present receipts report 3 presented frames per rendered frame (`requested=x3 actualPresented=3`). **4x, 5x and 6x are selectable but unverified** (RTX Encore itself marks 5x and 6x experimental). |
+| v1.1.0-experimental (prerelease) | Superseded by v1.2.0, kept for rollback. Its multiplier option could not lift RTX Encore's 2x menu limit. |
+| v1.0.0 | 2x build, verified in gameplay, kept for rollback. |
 
 ## Requirements
 
@@ -53,11 +67,12 @@ powershell -ExecutionPolicy Bypass -File tools\Install-KCDEncore.ps1
   - this add-on's `dinput8.dll` and `kcd_clarity.ini`
 
   It backs up everything it replaces into `Bin\Win64\.kcd-encore\`, then installs.
-- **Other actions:** `-Action Status`, `-Action Update` (keeps your settings), `-Action Rollback` (undoes the last
+- **Other actions:** `-Action Status`, `-Action Update` (keeps your `kcd_clarity.ini` and `rtx-encore.jsonc`;
+  new keys get their defaults), `-Action Rollback` (undoes the last
   install or update), `-Action Uninstall`.
 - **Options:**
   - `-GameDir <...\KingdomComeDeliverance>` if Steam detection fails.
-  - `-Release v1.1.0-experimental` for the experimental build.
+  - `-Release v1.0.0` (or another tag) installs an older release, for example to roll back.
 - **Other mods:** the installer only removes files it installed. It refuses to replace another mod's `dinput8.dll`
   or `version.dll` unless you pass `-Force`, and backs that file up first. Another `dinput8.dll` mod (Ultimate ASI
   Loader, full KCD1 Clarity) cannot be used together with this one.
@@ -68,10 +83,11 @@ Manual install:
 
 ## RTX Encore settings
 
-Open RTX Encore's menu in game (**Insert**), or edit `rtx-encore.jsonc`:
+Open RTX Encore's menu in game (its menu key, **Insert** by default), or edit `rtx-encore.jsonc`:
 
 - Frame generation for games without frame generation: **on**. Engine: **DLSS-FG**.
-- Frame generation mode: **Fixed**. Multiplier: **2**. With v1.1.0-experimental, choose up to 6.
+- Frame generation mode: **Fixed**. Multiplier: **2** is the conservative recommendation. **3** is verified in our
+  testing; 4 to 6 are available but unverified. Choose it in RTX Encore's menu.
 - Motion: **Game motion vectors**.
 - RTX Encore's own upscaling: **off**.
 - FG preset: game, A or B. Not C (Lite), which turns UI recomposition off.
@@ -88,7 +104,20 @@ Open RTX Encore's menu in game (**Insert**), or edit `rtx-encore.jsonc`:
 | `[encore] menu_suspend` | 1 | Pause frame generation in menus and loading |
 | `[encore] menu_draws` | 180 | Interface draws per frame that count as a menu (inventory) |
 | `[encore] menu_coverage` | 70 | Interface coverage (%) that counts as a menu |
-| `[encore] fg_multiplier` | -1 | v1.1.0-experimental only: -1 = RTX Encore's multiplier, 0 = RTX Encore's own limit of 2x, 2â€“6 = fixed |
+| `[encore] fg_multiplier` | -1 | -1 = the multiplier chosen in RTX Encore (recommended), 0 = RTX Encore's own request, 2-6 = force this multiplier |
+| `[encore] options_detour` | 1 | 1 = hook Streamline in place, so RTX Encore offers its higher multipliers. 0 = v1.1.0 behaviour (2x limit) |
+| `[encore] arch_spoof` | 0 | Unsuccessful experiment; leave at 0 |
+
+## Known limitations and observations
+
+- RTX Encore's own overlay can show negligible residual artifacts around its borders while the camera moves.
+- One very minor artifact near the screen centre was seen once, in one indoor dialogue while switching speakers.
+  It was not seen in other conversations; its cause is unknown and it is not a confirmed general issue.
+- Works only with RTX Encore 2.5.0 (exact build) and Streamline 2.14.16; other versions switch the RTX Encore
+  features off.
+- Multipliers above 3x have not been verified.
+
+Version history: [CHANGELOG.md](CHANGELOG.md).
 
 Diagnostics: `kcd_clarity.log` next to the game. F10 saves the current HUD-less and UI layers as BMP files.
 
@@ -108,4 +137,4 @@ build commands are at the top of each file. [docs/ARCHITECTURE.md](docs/ARCHITEC
   what is linked from the DLSS SDK at build time; see [THIRD_PARTY.md](THIRD_PARTY.md).
 - [MinHook](https://github.com/TsudaKageyu/minhook): BSD 2-Clause.
 
-Kingdom Come: Deliverance Â© Warhorse Studios / Deep Silver. This repository contains none of the game's files.
+Kingdom Come: Deliverance © Warhorse Studios / Deep Silver. This repository contains none of the game's files.

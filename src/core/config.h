@@ -24,6 +24,10 @@ struct Config {
     bool encore_ui_alpha = false;  // [encore] ui_input: 0 = UI color+alpha, 1 = UI alpha only (kBufferTypeUIAlpha)
     bool encore_menu_suspend = true;  // [encore] menu_suspend: no frame generation without 3D scene / in menus
     int encore_menu_coverage = 50;    // [encore] menu_coverage: interface coverage (%) that counts as a menu
+    bool encore_unlock_mfg = false;  // [encore] arch_spoof: report Blackwell to Encore's multiplier gates (failed
+                                     //               experiment 603aef7, not the cap; off)
+    bool encore_options_detour = true;  // [encore] options_detour: 1 = detour slDLSSGSetOptions inside sl.dlss_g so
+                                        //   Encore keeps sl.dlss_g as its wrapper (6x ceiling); 0 = old pointer swap
     int encore_fg_multiplier = -1;   // [encore] fg_multiplier: -1 follow rtx-encore.jsonc, 0 Encore's request, 2-6
     int encore_menu_draws = 0;        // [encore] menu_draws: interface draws per frame that count as a menu (0 = off)
 };

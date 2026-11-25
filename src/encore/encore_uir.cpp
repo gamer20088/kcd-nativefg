@@ -12,6 +12,7 @@
 #include <nvsdk_ngx_defs_dlssg.h>
 
 #include <atomic>
+#include <iterator>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -45,6 +46,14 @@ static const uint8_t kInputCopyPrologue[] = {0x40, 0x55, 0x53, 0x56, 0x57, 0x41,
 static const uint8_t kOptionsLoadBytes[] = {0x48, 0x8B, 0x05, 0xC9, 0x25, 0x1E, 0x01};
 static const uint8_t kSetTagCallBytes[] = {0xFF, 0x15, 0x91, 0x14, 0x1E, 0x01};  // call [rip+0x11E1491]
 static const uint8_t kCallRax[] = {0xFF, 0xD0};
+// Encore's graphics-API probe (movzx eax, byte [rip+...]; ret). Encore allows multipliers above 2x only when it
+// returns 4 (or two other API checks pass); on this DX11 route it does not, so every multiplier cap below is 2:
+//   0x115930 request callback (0x11E7C88), 0x0B4785 menu maximum (greys out 3x-6x), 0x13839E / 0x1392B9 runtime
+//   maximum, 0x0F5CDD DLSS-G generated-frame count, 0x0BDED4 "capped to native 2x". Dynamic MFG sites are left alone.
+constexpr uintptr_t kApiProbeRva = 0x1B3310;
+static const uint8_t kApiProbeBytes[] = {0x0F, 0xB6, 0x05, 0x19, 0xF4, 0x76, 0x01, 0xC3};
+constexpr uintptr_t kMfgGateReturnRvas[] = {0x115935, 0x0B478A, 0x1383A3, 0x1392BE, 0x0F5CE2, 0x0BDED9};
+constexpr uint8_t kMfgApi = 4;
 
 // sl::DLSSGOptions (Streamline 2.x, as Encore's own option dumper at 0xC4470 reads it).
 constexpr uint32_t kDlssgOptionsGuid[4] = {0xFAC5F1CB, 0x4F362DFD, 0x9E3AE6A1, 0xC5565286};
@@ -76,6 +85,33 @@ using SetTagFn = int(__fastcall*)(const void* frame, const void* viewport, const
 static uintptr_t g_base;
 static bool g_active;
 static InputCopyFn o_input_copy;
+using ApiProbeFn = uint8_t(__fastcall*)();
+static ApiProbeFn o_api_probe;
+static bool g_unlock_mfg = false;  // [encore] arch_spoof
+static std::atomic<uint32_t> g_unlock_hits;
+static std::atomic<uint32_t> g_site_hits[6];
+
+void set_unlock_mfg(bool on) { g_unlock_mfg = on; }
+static bool g_options_detour = true;  // [encore] options_detour
+void set_options_detour(bool on) { g_options_detour = on; }
+
+// Only the multiplier-cap call sites see the MFG-capable answer; every other Encore caller gets the real one.
+static uint8_t __fastcall hk_api_probe() {
+    const uint8_t v = o_api_probe();
+    if (!g_unlock_mfg || v == kMfgApi)
+        return v;
+    const uintptr_t ra = reinterpret_cast<uintptr_t>(_ReturnAddress()) - g_base;
+    for (size_t i = 0; i < std::size(kMfgGateReturnRvas); ++i) {
+        if (ra == kMfgGateReturnRvas[i]) {
+            ++g_unlock_hits;
+            if (++g_site_hits[i] == 1)  // first hit per site
+                logf("encore_uir: multiplier cap at +0x%llx lifted (GPU architecture %u)",
+                     (unsigned long long)(kMfgGateReturnRvas[i] - 5), v);
+            return kMfgApi;
+        }
+    }
+    return v;
+}
 static std::atomic<SetOptionsFn> g_real_set_options;
 static bool g_menu_detection = true;  // [encore] menu_detection
 static bool g_inputs = true;          // [encore] uir: hand HUD-less/UI to DLSS-G and enable UIR (0 = suspension only)
@@ -90,6 +126,92 @@ static std::wstring g_jsonc_path;
 static FILETIME g_jsonc_time;
 
 void set_fg_multiplier(int m) { g_fg_setting = m; }
+
+// RTX Encore's own menu is drawn after our HUD-less/UI capture, so DLSS-G would recompose our UI over frames that
+// lack it and the menu would look half transparent. While it is open we hand DLSS-G no HUD-less/UI image.
+static std::atomic<bool> g_encore_menu_open;
+static int g_menu_vk;
+
+// rtx-encore.jsonc "menuKey" (virtual-key code Encore's menu writes), 0 if absent.
+static int read_encore_menu_key() {
+    HANDLE h = CreateFileW(g_jsonc_path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return 0;
+    std::string text(64 * 1024, '\0');
+    DWORD n = 0;
+    ReadFile(h, text.data(), static_cast<DWORD>(text.size()), &n, nullptr);
+    CloseHandle(h);
+    text.resize(n);
+    const size_t k = text.find("\"menuKey\"");
+    if (k == std::string::npos)
+        return 0;
+    const int vk = atoi(text.c_str() + text.find(':', k) + 1);
+    return vk > 0 && vk < 255 ? vk : 0;
+}
+
+bool encore_menu_open() { return g_encore_menu_open.load(); }
+
+// Diagnostics (read-only): the Encore values that decide the multiplier limit, logged when they change.
+//   0x1922361 D157 midpoint-fix qualification (pre-Blackwell MFG), 0x11CAEC0 runtime maximum factor,
+//   0x11D4F80 menu capability struct (+0 route, +8 maximum factor the menu offers).
+static void log_encore_mfg_state() {
+    static uint32_t last[5] = {~0u, ~0u, ~0u, ~0u, ~0u};
+    const uint32_t now[5] = {*reinterpret_cast<const uint8_t*>(g_base + 0x1922361),
+                             *reinterpret_cast<const uint32_t*>(g_base + 0x11CAEC0),
+                             *reinterpret_cast<const uint32_t*>(g_base + 0x11D4F80),
+                             *reinterpret_cast<const uint32_t*>(g_base + 0x11D4F88),
+                             g_unlock_hits.load() ? 1u : 0u};
+    if (memcmp(now, last, sizeof(now)) == 0)
+        return;
+    memcpy(last, now, sizeof(now));
+    logf("encore_uir: Encore MFG state: midpoint-fix %u, runtime maximum %u, menu route %u, menu maximum %u, "
+         "gate sites hit %u/%u/%u/%u/%u/%u", now[0], now[1], now[2], now[3], g_site_hits[0].load(),
+         g_site_hits[1].load(), g_site_hits[2].load(), g_site_hits[3].load(), g_site_hits[4].load(),
+         g_site_hits[5].load());
+}
+
+// Encore's menu visibility: the byte SetMenuVisible (0x3FE6A0) writes with xchg and every UI backend reads before
+// drawing the menu window, e.g. 0x3FB7E6: movzx eax, byte [rip+0x1542463] -> 0x193DC50. Encore's D3D11 UI backend
+// (0x421020) composites the menu into the image DLSS-G receives; our HUD-less/UI alpha lack it, so with them DLSS-G
+// recomposes generated frames without the menu (it looks half transparent). While it is visible we hand over no
+// HUD-less/UI image and DLSS-G interpolates the full frame, menu included.
+constexpr uintptr_t kMenuVisibleRva = 0x193DC50;
+constexpr uintptr_t kMenuReaderRva = 0x3FB7E6;
+static const uint8_t kMenuReaderBytes[] = {0x0F, 0xB6, 0x05, 0x63, 0x24, 0x54, 0x01};
+static const volatile uint8_t* g_menu_visible;  // null: version guard failed, key-tracking fallback
+
+// Render thread, once per frame.
+static void update_encore_menu() {
+    static bool init, toggled, was_down;
+    if (!init) {
+        init = true;
+        if (memcmp(reinterpret_cast<const void*>(g_base + kMenuReaderRva), kMenuReaderBytes,
+                   sizeof(kMenuReaderBytes)) == 0)
+            g_menu_visible = reinterpret_cast<const volatile uint8_t*>(g_base + kMenuVisibleRva);
+        g_menu_vk = read_encore_menu_key();
+        if (!g_menu_vk)
+            g_menu_vk = VK_INSERT;
+        logf("encore_uir: RTX Encore menu visibility from %s",
+             g_menu_visible ? "Encore's menu state (0x193DC50)" : "its key (fallback: version guard mismatch)");
+    }
+    bool open;
+    if (g_menu_visible) {
+        open = *g_menu_visible != 0;
+    } else {  // fallback: menu key toggles, Escape closes
+        const bool down = (GetAsyncKeyState(g_menu_vk) & 0x8000) != 0;
+        if (down && !was_down)
+            toggled = !toggled;
+        was_down = down;
+        if (GetAsyncKeyState(VK_ESCAPE) & 0x8000)
+            toggled = false;
+        open = toggled;
+    }
+    if (g_encore_menu_open.exchange(open) != open)
+        logf("encore_uir: RTX Encore menu %s: HUD-less/UI inputs %s%s", open ? "visible" : "hidden",
+             open ? "paused (DLSS-G interpolates the full frame)" : "resumed",
+             g_suspended.load() ? "; frame generation paused for a game menu" : "");
+}
 
 // Reads frameGeneration.mode / multiplier from Encore's own config. 0 unless mode is "fixed".
 static int read_encore_multiplier() {
@@ -390,6 +512,10 @@ void set_fg_suspended(bool on) {
 
 // Render thread, once per frame (hudless::on_end_frame): apply a changed multiplier by re-sending Encore's last options.
 void on_frame() {
+    if (g_active) {
+        update_encore_menu();
+        log_encore_mfg_state();
+    }
     if (!g_active || !refresh_multiplier() || g_suspended.load())
         return;
     std::lock_guard lock(g_s.m);
@@ -556,7 +682,7 @@ static bool open11(ID3D11DeviceContext* ctx) {
 }
 
 void copy_hudless(ID3D11DeviceContext* ctx, ID3D11Resource* src) {
-    if (!g_active || !g_inputs || !ctx || !src)
+    if (!g_active || !g_inputs || g_encore_menu_open.load() || !ctx || !src)
         return;
     ID3D11Texture2D* tex = nullptr;
     if (FAILED(src->QueryInterface(IID_PPV_ARGS(&tex))))
@@ -590,7 +716,7 @@ void copy_hudless(ID3D11DeviceContext* ctx, ID3D11Resource* src) {
 }
 
 void finish_frame(ID3D11DeviceContext* ctx, ID3D11Resource* ui) {
-    if (!g_active || !g_inputs || !ctx || !ui)
+    if (!g_active || !g_inputs || g_encore_menu_open.load() || !ctx || !ui)
         return;
     std::lock_guard lock(g_s.m);
     if (g_s.broken || g_s.cur_slot < 0 || g_s.gen11 != g_s.gen)
@@ -756,18 +882,55 @@ static bool hook_ngx() {
     return true;
 }
 
-// Keeps the slDLSSGSetOptions pointer swapped (Encore resolves it at Streamline start, 0x1F0C0, and clears it on
-// reset, 0x1BD20) and installs the NGX probe once _nvngx.dll is loaded, before DLSS-G is created.
+// Wraps slDLSSGSetOptions and installs the NGX probe once _nvngx.dll is loaded, before DLSS-G is created.
+// RTX Encore treats the module that owns the resolved function as the frame generation provider and takes its
+// multiplier limit from it, so options_detour = 1 hooks the function in place inside sl.dlss_g and leaves Encore's
+// pointer alone. options_detour = 0 (or a failed detour) swaps the pointer, as v1.1.0 did (Encore then limits to 2x).
 static DWORD WINAPI options_watch(LPVOID) {
     auto* slot = reinterpret_cast<void* volatile*>(g_base + kSetOptionsPtrRva);
     void* const mine = reinterpret_cast<void*>(&hk_set_options);
-    bool wrapped = false, probed = false;
+    void* hooked[4] = {};  // detoured targets (a reloaded sl.dlss_g gets a new one; old ones are never touched)
+    bool wrapped = false, probed = false, detour = g_options_detour;
     for (;;) {
         void* cur = *slot;
-        if (cur && cur != mine &&
-            InterlockedCompareExchangePointer(const_cast<void**>(slot), mine, cur) == cur) {
+        if (cur && cur != mine && detour) {
+            bool known = false;
+            for (void* h : hooked)
+                known = known || h == cur;
+            if (!known) {
+                SetOptionsFn tramp = nullptr;
+                MH_STATUS c = MH_CreateHook(cur, mine, reinterpret_cast<void**>(&tramp));
+                MH_STATUS e = c == MH_OK ? MH_EnableHook(cur) : c;
+                HMODULE owner = nullptr;
+                GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   static_cast<LPCWSTR>(cur), &owner);
+                wchar_t name[MAX_PATH] = L"?";
+                if (owner)
+                    GetModuleFileNameW(owner, name, MAX_PATH);
+                const wchar_t* base = wcsrchr(name, L'\\');
+                logf("encore_uir: slDLSSGSetOptions %p (%ls) detoured in place %s/%s; Encore's pointer left unchanged",
+                     cur, base ? base + 1 : name, MH_StatusToString(c), MH_StatusToString(e));
+                for (void*& h : hooked)
+                    if (!h) {
+                        h = cur;
+                        break;
+                    }
+                if (e == MH_OK) {
+                    g_real_set_options.store(tramp);
+                    wrapped = true;
+                } else {
+                    if (c == MH_OK)
+                        MH_RemoveHook(cur);
+                    detour = false;  // keep UIR working through the pointer swap (multiplier ceiling stays 2x)
+                    logf("encore_uir: detour failed; falling back to the pointer swap");
+                    continue;
+                }
+            }
+        } else if (cur && cur != mine &&
+                   InterlockedCompareExchangePointer(const_cast<void**>(slot), mine, cur) == cur) {
             g_real_set_options.store(reinterpret_cast<SetOptionsFn>(cur));
-            logf("encore_uir: slDLSSGSetOptions pointer %p wrapped", cur);
+            logf("encore_uir: slDLSSGSetOptions pointer %p wrapped (options_detour 0: Encore admits this DLL as wrapper)",
+                 cur);
             wrapped = true;
         }
         if (!probed)
@@ -814,6 +977,19 @@ bool install() {
     if (e != MH_OK)
         return false;
     g_active = true;
+    if (g_unlock_mfg) {
+        bool sites = matches(kApiProbeRva, kApiProbeBytes, sizeof(kApiProbeBytes));
+        for (uintptr_t r : kMfgGateReturnRvas) {  // each site must be "call 0x1B3310"
+            const auto* p = reinterpret_cast<const uint8_t*>(g_base + r - 5);
+            int32_t rel;
+            memcpy(&rel, p + 1, sizeof(rel));
+            sites = sites && p[0] == 0xE8 && r + rel == kApiProbeRva;
+        }
+        void* probe = reinterpret_cast<void*>(g_base + kApiProbeRva);
+        MH_STATUS pc = sites ? MH_CreateHook(probe, &hk_api_probe, reinterpret_cast<void**>(&o_api_probe)) : MH_UNKNOWN;
+        MH_STATUS pe = pc == MH_OK ? MH_EnableHook(probe) : pc;
+        logf("encore_uir: multiplier unlock (DX11 2x cap): sites %s, hook %s", sites ? "match" : "DIFFER", MH_StatusToString(pe));
+    }
     HANDLE t = CreateThread(nullptr, 0, options_watch, nullptr, 0, nullptr);
     if (t)
         CloseHandle(t);

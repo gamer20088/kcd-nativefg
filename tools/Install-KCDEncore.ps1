@@ -16,7 +16,7 @@
 
 .EXAMPLE
     .\Install-KCDEncore.ps1                      # install, game folder found through Steam
-    .\Install-KCDEncore.ps1 -Action Update -Release v1.1.0-experimental
+    .\Install-KCDEncore.ps1 -Action Update -Release v1.0.0   
     .\Install-KCDEncore.ps1 -Action Rollback
     .\Install-KCDEncore.ps1 -Action Uninstall
 #>
@@ -25,7 +25,7 @@ param(
     [ValidateSet('Install', 'Update', 'Rollback', 'Uninstall', 'Status')]
     [string]$Action = 'Install',
     [string]$GameDir,                                   # ...\KingdomComeDeliverance (auto-detected if omitted)
-    [string]$Release = 'v1.0.0',                        # this add-on's GitHub release tag
+    [string]$Release = 'v1.2.0',                        # this add-on's GitHub release tag
     [string]$Repo = 'gamer20088/kcd-nativefg',
     [string]$ModDir,                                    # local folder with dinput8.dll (+ profiles) instead of gh
     [string]$CacheDir = (Join-Path $env:LOCALAPPDATA 'KCDEncore\cache'),

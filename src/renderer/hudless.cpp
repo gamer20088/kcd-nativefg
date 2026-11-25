@@ -575,8 +575,12 @@ static void update_menu_suspend() {
     if (!g_menu_suspend)
         return;
     const bool scene = taa_dlss::scene_last_frame();
+    // With a 3D scene, a menu needs many interface draws AND most of the screen covered: either signal alone
+    // misfired in normal play (330-370 draws at 0-2% coverage in busy scenes; 100% coverage at 120-150 draws),
+    // pausing frame generation for 5-17 s. Map and loading screens still pause through "no 3D scene".
     const bool by_draws = g_menu_draws && g_ui_draws_frame >= g_menu_draws;
-    const bool menu = !scene || (g_coverage >= g_menu_coverage) || by_draws;
+    const bool by_coverage = g_coverage >= g_menu_coverage;
+    const bool menu = !scene || (g_menu_draws ? (by_draws && by_coverage) : by_coverage);
     if (!menu && g_ui_draws_frame > g_ui_draws_max_calm)
         g_ui_draws_max_calm = g_ui_draws_frame;
     bool want = g_suspended;
